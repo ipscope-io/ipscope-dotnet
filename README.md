@@ -1,4 +1,4 @@
-# `IpScope.Sdk` — Official IPScope Server-Side .NET SDK
+# `IpScope.Sdk` - Official IPScope Server-Side .NET SDK
 
 Official zero-dependency, thread-safe, strictly typed server-side **.NET / C# SDK** (`IpScope.Sdk`) for the **IPScope IP Intelligence Platform**, supporting both **Asynchronous (`Task` / `IAsyncEnumerable`)** and **Synchronous** execution.
 
