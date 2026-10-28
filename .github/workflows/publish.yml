@@ -13,6 +13,7 @@ jobs:
     permissions:
       contents: write
       packages: write
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -30,8 +31,18 @@ jobs:
       - name: Pack NuGet Package
         run: dotnet pack src/IpScope.Sdk/IpScope.Sdk.csproj --configuration Release --output ./artifacts
 
-      - name: Push to NuGet.org (when NUGET_API_KEY is set)
-        if: env.NUGET_API_KEY != ''
+      - name: NuGet OIDC Login (Trusted Publishing)
+        if: env.HAS_SECRET_KEY == ''
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: dotnet nuget push ./artifacts/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          HAS_SECRET_KEY: ${{ secrets.NUGET_API_KEY }}
+        uses: NuGet/login@v1
+        id: nuget_login
+        with:
+          user: hasanmuzak
+        continue-on-error: true
+
+      - name: Push to NuGet.org
+        if: env.API_KEY != ''
+        env:
+          API_KEY: ${{ secrets.NUGET_API_KEY || steps.nuget_login.outputs.NUGET_API_KEY }}
+        run: dotnet nuget push ./artifacts/*.nupkg --api-key "$API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
