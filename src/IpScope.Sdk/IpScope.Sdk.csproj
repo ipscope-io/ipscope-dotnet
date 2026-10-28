@@ -15,6 +15,14 @@
     <Description>Official zero-dependency, type-safe Sync &amp; Async .NET Server-Side SDK for the IPScope IP Intelligence Platform.</Description>
     <PackageTags>ip;geolocation;asn;vpn-detection;ip-intelligence;ipscope</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://ipscope.io/docs/sdks/dotnet</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ipscope-io/ipscope-dotnet</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
 </Project>

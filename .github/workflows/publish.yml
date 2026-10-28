@@ -1,0 +1,37 @@
+name: Publish to NuGet
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Pack & Publish to NuGet
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build & Test
+        run: |
+          dotnet build tests/IpScope.Sdk.Tests/IpScope.Sdk.Tests.csproj --configuration Release
+          dotnet run --project tests/IpScope.Sdk.Tests/IpScope.Sdk.Tests.csproj --configuration Release --no-build
+
+      - name: Pack NuGet Package
+        run: dotnet pack src/IpScope.Sdk/IpScope.Sdk.csproj --configuration Release --output ./artifacts
+
+      - name: Push to NuGet.org (when NUGET_API_KEY is set)
+        if: env.NUGET_API_KEY != ''
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: dotnet nuget push ./artifacts/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
