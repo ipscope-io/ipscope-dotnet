@@ -32,7 +32,7 @@ dotnet add package IpScope.Sdk
 ```csharp
 using IpScope.Sdk;
 
-var client = new IpScopeClient("ips_live_your_api_key_here");
+var client = new IpScopeClient("<public>:<private>");
 
 // 1. Single IPv4 or IPv6 lookup (cached in LRU cache & singleflight-coalesced)
 IpLookupResponse ipInfo = await client.LookupIpAsync("8.8.8.8");
@@ -74,7 +74,7 @@ Console.WriteLine($"{prefix.QueriedCidr} ({prefix.DatasetVersion})");
 ```csharp
 using IpScope.Sdk;
 
-var client = new IpScopeClient("ips_live_your_api_key_here");
+var client = new IpScopeClient("<public>:<private>");
 
 IpLookupResponse ipInfo = client.LookupIp("1.1.1.1");
 Console.WriteLine($"{ipInfo.Ip} -> {ipInfo.Network.Organization}");
