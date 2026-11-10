@@ -10,7 +10,8 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
 
     <PackageId>IpScope.Sdk</PackageId>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
+    <PackageReleaseNotes>See CHANGELOG.md: https://github.com/ipscope-io/ipscope-dotnet/blob/main/CHANGELOG.md</PackageReleaseNotes>
     <Authors>IPScope Engineering</Authors>
     <Description>Official zero-dependency, type-safe Sync &amp; Async .NET Server-Side SDK for the IPScope IP Intelligence Platform.</Description>
     <PackageTags>ip;geolocation;asn;vpn-detection;ip-intelligence;ipscope</PackageTags>

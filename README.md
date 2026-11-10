@@ -22,8 +22,10 @@ Official zero-dependency, thread-safe, strictly typed server-side **.NET / C# SD
 ## Installation
 
 ```bash
-dotnet add package IpScope.Sdk
+dotnet add package IpScope.Sdk --version 1.1.0
 ```
+
+API keys have the form `<public>:<private>` (a UUID, a colon, and a 43-character base64url secret).
 
 ---
 
@@ -32,7 +34,8 @@ dotnet add package IpScope.Sdk
 ```csharp
 using IpScope.Sdk;
 
-var client = new IpScopeClient("<public>:<private>");
+using var client = new IpScopeClient("<public>:<private>");
+List<string> largeIpList = Enumerable.Range(1, 254).Select(i => $"192.0.2.{i}").ToList();
 
 // 1. Single IPv4 or IPv6 lookup (cached in LRU cache & singleflight-coalesced)
 IpLookupResponse ipInfo = await client.LookupIpAsync("8.8.8.8");
@@ -64,7 +67,81 @@ await foreach (BatchLookupResponse chunk in client.LookupBatchStreamAsync(largeI
 
 // 5. Network CIDR prefix lookup
 NetworkPrefixLookupResponse prefix = await client.LookupNetworkAsync("8.8.8.0/24");
-Console.WriteLine($"{prefix.QueriedCidr} ({prefix.DatasetVersion})");
+Console.WriteLine($"{prefix.QueriedCidr} matched {prefix.MatchedNetwork} (/{prefix.BgpPrefixLength}) in {prefix.DatasetVersion}");
+if (prefix.Record is { } networkRecord)
+{
+    Console.WriteLine($"record: {networkRecord.CountryCode} hosting={networkRecord.IsHosting}");
+}
+if (prefix.Lookup is { } baseLookup)
+{
+    Console.WriteLine($"base address city: {baseLookup.Geo.City}");
+}
+```
+
+---
+
+## Reading the Response
+
+```csharp
+using IpScope.Sdk;
+
+using var client = new IpScopeClient("<public>:<private>");
+IpLookupResponse info = await client.LookupIpAsync("8.8.8.8");
+
+// Representative coordinates (never device GPS) and postal code; null when unknown
+Console.WriteLine($"{info.Geo.Latitude}, {info.Geo.Longitude} {info.Geo.PostalCode}");
+
+// Consumer privacy relays (e.g. iCloud Private Relay) are flagged separately from VPN/proxy
+Console.WriteLine($"relay={info.Security.IsRelay} vpn={info.Security.IsVpn}");
+
+// Abuse velocity score on a 0-100 scale (present when security_extensions is licensed)
+if (info.SecurityExtensions is { } ext)
+{
+    Console.WriteLine($"abuse score: {ext.AbuseVelocityScore}");
+}
+```
+
+---
+
+## Rate-Limit Metadata
+
+```csharp
+using IpScope.Sdk;
+
+using var client = new IpScopeClient("<public>:<private>");
+IpScopeResultWithMeta<IpLookupResponse> res = await client.LookupIpWithMetaAsync("1.1.1.1");
+
+// X-RateLimit-Limit / -Remaining / -Reset / -Scope.
+// ResetAfterSeconds is the number of seconds until the window resets (not an epoch).
+RateLimitMetadata rl = res.RateLimit;
+Console.WriteLine($"{rl.Remaining}/{rl.LimitPerMinute} left, resets in {rl.ResetAfterSeconds}s (scope {rl.Scope})");
+```
+
+---
+
+## Submitting Feedback
+
+`Role` is one of `network_owner`, `user`, `researcher` (`FeedbackValues.Roles`); `IssueType` is one of
+`wrong_country`, `wrong_city`, `false_positive_vpn`, `false_positive_hosting`, `false_positive_tor`,
+`virtual_location_mismatch`, `other` (`FeedbackValues.IssueTypes`).
+
+```csharp
+using IpScope.Sdk;
+
+using var client = new IpScopeClient("<public>:<private>");
+
+var feedback = new FeedbackSubmissionInput(
+    "203.0.113.0/24",
+    "network_owner",
+    "wrong_country",
+    new Dictionary<string, object?> { ["country_code"] = "DE" },
+    EvidenceUrl: "https://example.net/geofeed.csv",
+    ContactConsent: true,
+    ContactEmail: "noc@example.net"
+);
+
+FeedbackSubmissionResponse receipt = await client.SubmitFeedbackAsync(feedback);
+Console.WriteLine($"{receipt.Id} {receipt.Status} {receipt.CreatedAt}");
 ```
 
 ---
@@ -74,7 +151,7 @@ Console.WriteLine($"{prefix.QueriedCidr} ({prefix.DatasetVersion})");
 ```csharp
 using IpScope.Sdk;
 
-var client = new IpScopeClient("<public>:<private>");
+using var client = new IpScopeClient("<public>:<private>");
 
 IpLookupResponse ipInfo = client.LookupIp("1.1.1.1");
 Console.WriteLine($"{ipInfo.Ip} -> {ipInfo.Network.Organization}");

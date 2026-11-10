@@ -1,9 +1,12 @@
+using System.ComponentModel;
 using System.Text.Json.Serialization;
 
 namespace IpScope.Sdk;
 
 /// <summary>
 /// Geographic classification and confidence returned in <see cref="IpLookupResponse.Geo"/>.
+/// <see cref="Latitude"/>/<see cref="Longitude"/> are representative coordinates (never device GPS);
+/// <see cref="PostalCode"/> is present when the city dataset has one. All three may be <c>null</c>.
 /// </summary>
 public sealed record GeoBlock(
     [property: JsonPropertyName("country_code")] string? CountryCode,
@@ -15,7 +18,10 @@ public sealed record GeoBlock(
     [property: JsonPropertyName("accuracy_radius_km")] double? AccuracyRadiusKm,
     [property: JsonPropertyName("declared_country_code")] string? DeclaredCountryCode,
     [property: JsonPropertyName("physical_country_code")] string? PhysicalCountryCode,
-    [property: JsonPropertyName("is_virtual_location")] bool? IsVirtualLocation
+    [property: JsonPropertyName("is_virtual_location")] bool? IsVirtualLocation,
+    [property: JsonPropertyName("postal_code")] string? PostalCode = null,
+    [property: JsonPropertyName("latitude")] double? Latitude = null,
+    [property: JsonPropertyName("longitude")] double? Longitude = null
 );
 
 /// <summary>
@@ -28,6 +34,8 @@ public sealed record NetworkBlock(
 
 /// <summary>
 /// Security, hosting, and anonymity classification returned in <see cref="IpLookupResponse.Security"/>.
+/// <see cref="IsRelay"/> is <c>true</c> for a published consumer privacy-relay egress (e.g. Apple iCloud
+/// Private Relay); relay users are not reported as VPN, proxy or hosting. <c>null</c> when unknown.
 /// </summary>
 public sealed record SecurityBlock(
     [property: JsonPropertyName("is_vpn")] bool? IsVpn,
@@ -36,7 +44,8 @@ public sealed record SecurityBlock(
     [property: JsonPropertyName("is_proxy")] bool? IsProxy,
     [property: JsonPropertyName("anonymizer_type")] string AnonymizerType,
     [property: JsonPropertyName("confidence")] double Confidence,
-    [property: JsonPropertyName("reason_codes")] IReadOnlyList<string>? ReasonCodes
+    [property: JsonPropertyName("reason_codes")] IReadOnlyList<string>? ReasonCodes,
+    [property: JsonPropertyName("is_relay")] bool? IsRelay = null
 );
 
 /// <summary>
@@ -52,6 +61,8 @@ public sealed record ConnectionBlock(
 
 /// <summary>
 /// Optional security extensions telemetry block returned when licensed.
+/// <see cref="AbuseVelocityScore"/> is a 0-100 score (an integer on the wire) or <c>null</c>; it is typed
+/// <see cref="double"/> so older fractional payloads still parse.
 /// </summary>
 public sealed record SecurityExtensionsBlock(
     [property: JsonPropertyName("abuse_velocity_score")] double? AbuseVelocityScore,
@@ -86,30 +97,54 @@ public sealed record BatchLookupResponse(
 
 /// <summary>
 /// Canonical network prefix record returned in <c>GET /v1/networks/:prefix/:length</c>.
+/// The API serializes this record in camelCase (<c>countryCode</c>, <c>isVpn</c>, ...); camelCase and
+/// snake_case keys are both read (see <see cref="CanonicalNetworkPrefixRecordConverter"/>).
+/// <see cref="AbuseVelocityScore"/> is a 0-100 score or <c>null</c>.
 /// </summary>
+[JsonConverter(typeof(CanonicalNetworkPrefixRecordConverter))]
 public sealed record CanonicalNetworkPrefixRecord(
-    [property: JsonPropertyName("prefix")] string Prefix,
-    [property: JsonPropertyName("family")] int Family,
-    [property: JsonPropertyName("asn")] int? Asn,
-    [property: JsonPropertyName("organization")] string? Organization,
-    [property: JsonPropertyName("country_code")] string? CountryCode,
-    [property: JsonPropertyName("city")] string? City,
-    [property: JsonPropertyName("location_type")] string? LocationType,
-    [property: JsonPropertyName("is_vpn")] bool? IsVpn,
-    [property: JsonPropertyName("is_hosting")] bool? IsHosting,
-    [property: JsonPropertyName("is_tor_exit")] bool? IsTorExit,
-    [property: JsonPropertyName("is_proxy")] bool? IsProxy,
-    [property: JsonPropertyName("anonymizer_type")] string? AnonymizerType
+    string Prefix,
+    int Family,
+    int? Asn,
+    string? Organization,
+    string? CountryCode,
+    string? City,
+    string? LocationType,
+    bool? IsVpn,
+    bool? IsHosting,
+    bool? IsTorExit,
+    bool? IsProxy,
+    string? AnonymizerType,
+    string? Subdivision = null,
+    string? PostalCode = null,
+    double? Latitude = null,
+    double? Longitude = null,
+    string? Timezone = null,
+    double? GeoConfidence = null,
+    double? AccuracyRadiusKm = null,
+    bool? IsVirtualLocation = null,
+    string? ConnectionType = null,
+    bool? IsRelay = null,
+    double? SecurityConfidence = null,
+    double? AbuseVelocityScore = null,
+    bool? IsKnownScanner = null,
+    IReadOnlyList<string>? ReasonCodes = null,
+    string? UpdatedAt = null
 );
 
 /// <summary>
 /// Network CIDR prefix lookup response (<c>GET /v1/networks/:prefix/:length</c>).
+/// <see cref="MatchedNetwork"/> is the most-specific matched prefix, <see cref="BgpPrefixLength"/> its length,
+/// and <see cref="Lookup"/> the full IP lookup for the prefix's base address (each may be <c>null</c>).
 /// </summary>
 public sealed record NetworkPrefixLookupResponse(
     [property: JsonPropertyName("queried_cidr")] string QueriedCidr,
     [property: JsonPropertyName("family")] int Family,
     [property: JsonPropertyName("dataset_version")] string DatasetVersion,
-    [property: JsonPropertyName("record")] CanonicalNetworkPrefixRecord? Record
+    [property: JsonPropertyName("record")] CanonicalNetworkPrefixRecord? Record,
+    [property: JsonPropertyName("matched_network")] string? MatchedNetwork = null,
+    [property: JsonPropertyName("bgp_prefix_length")] int? BgpPrefixLength = null,
+    [property: JsonPropertyName("lookup")] IpLookupResponse? Lookup = null
 );
 
 /// <summary>
@@ -134,18 +169,84 @@ public sealed record DatasetsMetadataResponse(
 );
 
 /// <summary>
+/// Values accepted by <c>POST /v1/feedback</c>.
+/// </summary>
+public static class FeedbackValues
+{
+    /// <summary>Reporter roles accepted as <see cref="FeedbackSubmissionInput.Role"/>.</summary>
+    public static IReadOnlyList<string> Roles { get; } = ["network_owner", "user", "researcher"];
+
+    /// <summary>Issue classifications accepted as <see cref="FeedbackSubmissionInput.IssueType"/>.</summary>
+    public static IReadOnlyList<string> IssueTypes { get; } =
+    [
+        "wrong_country",
+        "wrong_city",
+        "false_positive_vpn",
+        "false_positive_hosting",
+        "false_positive_tor",
+        "virtual_location_mismatch",
+        "other"
+    ];
+}
+
+/// <summary>
 /// Input payload for submitting IP/prefix correction feedback (<c>POST /v1/feedback</c>).
+/// <see cref="Role"/> is one of <see cref="FeedbackValues.Roles"/>; <see cref="IssueType"/> one of
+/// <see cref="FeedbackValues.IssueTypes"/>. Pass the optional fields by name, e.g.
+/// <c>new FeedbackSubmissionInput(ip, "network_owner", "wrong_country", correction, EvidenceUrl: url)</c>.
+/// Unset optional fields are not sent.
 /// </summary>
 public sealed record FeedbackSubmissionInput(
     [property: JsonPropertyName("prefix_or_ip")] string PrefixOrIp,
     [property: JsonPropertyName("role")] string Role,
     [property: JsonPropertyName("issue_type")] string IssueType,
     [property: JsonPropertyName("requested_correction")] IReadOnlyDictionary<string, object?> RequestedCorrection,
-    [property: JsonPropertyName("evidence_urls")] IReadOnlyList<string>? EvidenceUrls = null
-);
+    [property: JsonIgnore]
+    [property: Obsolete("The API accepts a single URL; use EvidenceUrl. The first entry is sent as evidence_url when EvidenceUrl is null.")]
+    IReadOnlyList<string>? EvidenceUrls = null,
+    [property: JsonPropertyName("evidence_url")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? EvidenceUrl = null,
+    [property: JsonPropertyName("contact_consent")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    bool? ContactConsent = null,
+    [property: JsonPropertyName("contact_email")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ContactEmail = null
+)
+{
+    /// <summary>1.0.x constructor, kept for binary compatibility.</summary>
+    [Obsolete("The API accepts a single URL; use the EvidenceUrl parameter.")]
+    public FeedbackSubmissionInput(
+        string PrefixOrIp,
+        string Role,
+        string IssueType,
+        IReadOnlyDictionary<string, object?> RequestedCorrection,
+        IReadOnlyList<string>? EvidenceUrls
+    ) : this(PrefixOrIp, Role, IssueType, RequestedCorrection, EvidenceUrls, null, null, null)
+    {
+    }
+
+    /// <summary>The evidence URL that is sent: <see cref="EvidenceUrl"/>, else the first non-blank legacy entry.</summary>
+    [JsonIgnore]
+    public string? EffectiveEvidenceUrl
+    {
+        get
+        {
+            if (EvidenceUrl is not null)
+            {
+                return EvidenceUrl;
+            }
+#pragma warning disable CS0618
+            return EvidenceUrls?.FirstOrDefault(u => !string.IsNullOrWhiteSpace(u));
+#pragma warning restore CS0618
+        }
+    }
+}
 
 /// <summary>
 /// Response returned when submitting IP/prefix correction feedback (<c>POST /v1/feedback</c>).
+/// <see cref="CreatedAt"/> is read from <c>createdAt</c> (current API) or <c>created_at</c>.
 /// </summary>
 public sealed record FeedbackSubmissionResponse(
     [property: JsonPropertyName("id")] string Id,
@@ -153,10 +254,30 @@ public sealed record FeedbackSubmissionResponse(
     [property: JsonPropertyName("role")] string Role,
     [property: JsonPropertyName("issue_type")] string IssueType,
     [property: JsonPropertyName("requested_correction")] IReadOnlyDictionary<string, object?> RequestedCorrection,
-    [property: JsonPropertyName("created_at")] string CreatedAt,
+    [property: JsonPropertyName("createdAt")] string CreatedAt,
     [property: JsonPropertyName("status")] string Status,
-    [property: JsonPropertyName("evidence_urls")] IReadOnlyList<string>? EvidenceUrls = null
-);
+    [property: JsonPropertyName("evidence_urls")] IReadOnlyList<string>? EvidenceUrls = null,
+    [property: JsonPropertyName("evidence_url")] string? EvidenceUrl = null,
+    [property: JsonPropertyName("contact_consent")] bool? ContactConsent = null,
+    [property: JsonPropertyName("contact_email")] string? ContactEmail = null
+)
+{
+    /// <summary>Reads the snake_case <c>created_at</c> spelling into <see cref="CreatedAt"/>.</summary>
+    [JsonPropertyName("created_at")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public string? CreatedAtSnakeCase
+    {
+        get => null;
+        init
+        {
+            if (string.IsNullOrEmpty(CreatedAt) && value is not null)
+            {
+                CreatedAt = value;
+            }
+        }
+    }
+}
 
 public sealed record ServiceSnapshotInfo(
     [property: JsonPropertyName("currentVersion")] string? CurrentVersion,
@@ -179,7 +300,9 @@ public sealed record ServiceStatusResponse(
 }
 
 /// <summary>
-/// Parsed user-scoped rate-limit headers returned by <c>@ipscope/api</c>.
+/// Parsed user-scoped rate-limit headers (<c>X-RateLimit-Limit</c>, <c>-Remaining</c>, <c>-Reset</c>, <c>-Scope</c>).
+/// <see cref="ResetAfterSeconds"/> is the number of seconds until the window resets
+/// (<c>X-RateLimit-Reset</c> is relative, not an epoch).
 /// </summary>
 public sealed record RateLimitMetadata(
     int? LimitPerMinute = null,
@@ -187,8 +310,37 @@ public sealed record RateLimitMetadata(
     long? ResetEpochSeconds = null,
     string? Scope = null,
     int? BurstCapacity = null,
-    int? RateLimitRps = null
-);
+    int? RateLimitRps = null,
+    long? ResetAfterSeconds = null
+)
+{
+    /// <summary>1.0.x constructor, kept for binary compatibility.</summary>
+    public RateLimitMetadata(
+        int? LimitPerMinute,
+        int? Remaining,
+        long? ResetEpochSeconds,
+        string? Scope,
+        int? BurstCapacity,
+        int? RateLimitRps
+    ) : this(LimitPerMinute, Remaining, ResetEpochSeconds, Scope, BurstCapacity, RateLimitRps, ResetAfterSeconds: null)
+    {
+    }
+
+    /// <summary>Seconds until the current rate-limit window resets (<c>X-RateLimit-Reset</c>).</summary>
+    public long? ResetAfterSeconds { get; init; } = ResetAfterSeconds ?? ResetEpochSeconds;
+
+    /// <summary>Same value as <see cref="ResetAfterSeconds"/>; it was never a Unix epoch.</summary>
+    [Obsolete("X-RateLimit-Reset is seconds until reset, not an epoch. Use ResetAfterSeconds.")]
+    public long? ResetEpochSeconds { get; init; } = ResetEpochSeconds ?? ResetAfterSeconds;
+
+    /// <summary>Always <c>null</c>: the API sends no burst header.</summary>
+    [Obsolete("The API does not send a burst header; always null.")]
+    public int? BurstCapacity { get; init; } = BurstCapacity;
+
+    /// <summary>Always <c>null</c>: the API sends no RPS header.</summary>
+    [Obsolete("The API does not send an RPS header; always null.")]
+    public int? RateLimitRps { get; init; } = RateLimitRps;
+}
 
 /// <summary>
 /// Envelope containing both the typed API response data and HTTP/rate-limit metadata.

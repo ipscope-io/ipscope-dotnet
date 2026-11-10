@@ -23,6 +23,9 @@ internal sealed class MockHttpMessageHandler(
 
 internal static class Program
 {
+    private const string TestKey =
+        "00000000-0000-4000-8000-000000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
     public static async Task Main()
     {
         TestValidationAndStrictIpScope();
@@ -30,7 +33,8 @@ internal static class Program
         await TestBatchDeduplicationChunkedAndStreamAsync();
         TestSyncLookupAndEndpoints();
         await TestRetriesAuthErrorOversizedGuardAndLruBoundsAsync();
-        Console.WriteLine("ALL 5 .NET SDK TEST SUITES PASSED!");
+        TestWireCompatibilityOfNewFields();
+        Console.WriteLine("ALL 6 .NET SDK TEST SUITES PASSED!");
     }
 
     private static Dictionary<string, object?> MakeMockIpRecord(string ip)
@@ -47,6 +51,9 @@ internal static class Program
                 ["country_code"] = "US",
                 ["subdivision"] = "California",
                 ["city"] = "Mountain View",
+                ["postal_code"] = "94043",
+                ["latitude"] = 37.422,
+                ["longitude"] = -122.085,
                 ["timezone"] = "America/Los_Angeles",
                 ["location_type"] = "anycast",
                 ["confidence"] = 0.96,
@@ -66,6 +73,7 @@ internal static class Program
                 ["is_hosting"] = true,
                 ["is_tor_exit"] = false,
                 ["is_proxy"] = false,
+                ["is_relay"] = false,
                 ["anonymizer_type"] = "none",
                 ["confidence"] = 0.99,
                 ["reason_codes"] = new[] { "ASN_HOSTING" }
@@ -80,7 +88,7 @@ internal static class Program
             },
             ["security_extensions"] = new Dictionary<string, object?>
             {
-                ["abuse_velocity_score"] = 0.02,
+                ["abuse_velocity_score"] = 80,
                 ["is_known_scanner"] = false,
                 ["observation_recency_hours"] = 1.5
             },
@@ -98,18 +106,17 @@ internal static class Program
         };
         resp.Headers.TryAddWithoutValidation("x-ratelimit-limit", "1000");
         resp.Headers.TryAddWithoutValidation("x-ratelimit-remaining", "998");
-        resp.Headers.TryAddWithoutValidation("x-ratelimit-reset", "1761350400");
+        resp.Headers.TryAddWithoutValidation("x-ratelimit-reset", "42");
         resp.Headers.TryAddWithoutValidation("x-ratelimit-scope", "user");
-        resp.Headers.TryAddWithoutValidation("x-ratelimit-burst", "100");
-        resp.Headers.TryAddWithoutValidation("x-ratelimit-rps", "50");
         return resp;
     }
 
     private static void TestValidationAndStrictIpScope()
     {
-        AssertEqual("ips_live_secret_12345", IpScopeValidator.ValidateApiKey("  ips_live_secret_12345  "));
+        AssertEqual(TestKey, IpScopeValidator.ValidateApiKey("  " + TestKey + "  "));
         AssertThrows<IpScopeValidationException>(() => IpScopeValidator.ValidateApiKey("   "));
-        AssertThrows<IpScopeValidationException>(() => IpScopeValidator.ValidateApiKey("ips_live_bad\nheader"));
+        AssertThrows<IpScopeValidationException>(() => IpScopeValidator.ValidateApiKey("bad\nheader"));
+        AssertEqual("ipscope-dotnet/1.1.0", IpScopeClient.SdkUserAgent);
 
         var v4 = IpScopeValidator.ValidateIpAddress(" 8.8.8.8 ");
         AssertEqual("8.8.8.8", v4.CanonicalIp);
@@ -157,7 +164,7 @@ internal static class Program
 
         using var httpClient = new HttpClient(handler);
         using var client = new IpScopeClient(
-            "ips_live_valid_key_12345",
+            TestKey,
             new IpScopeClientOptions(HttpClient: httpClient)
         );
 
@@ -169,7 +176,25 @@ internal static class Program
         AssertEqual("US", results[0].Geo.CountryCode);
         AssertEqual(15169, results[0].Network.Asn);
         AssertTrue(client.GetCacheStats().CoalescedInFlightHits > 0, "Expected singleflight hits");
-        AssertEqual(998, client.GetLastRateLimit()?.Remaining);
+
+        RateLimitMetadata rl = client.GetLastRateLimit()!;
+        AssertEqual(1000, rl.LimitPerMinute);
+        AssertEqual(998, rl.Remaining);
+        AssertEqual(42L, rl.ResetAfterSeconds);
+        AssertEqual("user", rl.Scope);
+#pragma warning disable CS0618
+        AssertEqual(42L, rl.ResetEpochSeconds);
+        AssertEqual<int?>(null, rl.BurstCapacity);
+        AssertEqual<int?>(null, rl.RateLimitRps);
+        AssertEqual(30L, new RateLimitMetadata(10, 9, 30L, "user", null, null).ResetAfterSeconds);
+#pragma warning restore CS0618
+
+        IpLookupResponse first = results[0];
+        AssertEqual(37.422, first.Geo.Latitude);
+        AssertEqual(-122.085, first.Geo.Longitude);
+        AssertEqual("94043", first.Geo.PostalCode);
+        AssertEqual(false, first.Security.IsRelay);
+        AssertEqual(80.0, first.SecurityExtensions?.AbuseVelocityScore);
 
         Console.WriteLine("  [PASS] TestAsyncSingleflightAndCacheAsync");
     }
@@ -208,7 +233,7 @@ internal static class Program
 
         using var httpClient = new HttpClient(handler);
         using var client = new IpScopeClient(
-            "ips_live_valid_key_12345",
+            TestKey,
             new IpScopeClientOptions(HttpClient: httpClient)
         );
 
@@ -246,26 +271,69 @@ internal static class Program
 
     private static void TestSyncLookupAndEndpoints()
     {
-        var handler = new MockHttpMessageHandler((req, _) =>
+        var feedbackBodies = new List<JsonElement>();
+        var handler = new MockHttpMessageHandler(async (req, ct) =>
         {
             string path = req.RequestUri!.AbsolutePath;
-            return Task.FromResult(path switch
+            if (path == "/v1/feedback")
+            {
+                string body = await req.Content!.ReadAsStringAsync(ct);
+                using JsonDocument doc = JsonDocument.Parse(body);
+                lock (feedbackBodies)
+                {
+                    feedbackBodies.Add(doc.RootElement.Clone());
+                }
+                // Echo the payload the way the API does: dto spread + id, camelCase createdAt, status.
+                var echo = JsonSerializer.Deserialize<Dictionary<string, object?>>(body)!;
+                echo["id"] = "fb_dotnet_999";
+                echo["createdAt"] = "2026-10-25T10:00:00Z";
+                echo["status"] = "pending_review";
+                return CreateJsonResponse(HttpStatusCode.Created, echo);
+            }
+            return path switch
             {
                 "/v1/ip/8.8.8.8" => CreateJsonResponse(HttpStatusCode.OK, MakeMockIpRecord("8.8.8.8")),
                 "/v1/ip/me" => CreateJsonResponse(HttpStatusCode.OK, MakeMockIpRecord("203.0.113.42")),
                 "/v1/networks/8.8.8.0/24" => CreateJsonResponse(HttpStatusCode.OK, new Dictionary<string, object?>
                 {
                     ["queried_cidr"] = "8.8.8.0/24",
+                    ["matched_network"] = "8.8.8.0/24",
                     ["family"] = 4,
+                    ["bgp_prefix_length"] = 24,
                     ["dataset_version"] = "2026.10.25-001",
                     ["record"] = new Dictionary<string, object?>
                     {
-                        ["prefix"] = "8.8.8.0/24",
                         ["family"] = 4,
+                        ["prefix"] = "8.8.8.0/24",
                         ["asn"] = 15169,
                         ["organization"] = "Google LLC",
-                        ["country_code"] = "US"
-                    }
+                        ["locations"] = new Dictionary<string, object?>(),
+                        ["countryCode"] = "US",
+                        ["subdivision"] = "California",
+                        ["city"] = "Mountain View",
+                        ["postalCode"] = "94043",
+                        ["latitude"] = 37.422,
+                        ["longitude"] = -122.085,
+                        ["timezone"] = "America/Los_Angeles",
+                        ["locationType"] = "declared",
+                        ["geoConfidence"] = 0.85,
+                        ["accuracyRadiusKm"] = 300,
+                        ["isVirtualLocation"] = null,
+                        ["connectionType"] = "hosting",
+                        ["isHosting"] = true,
+                        ["isVpn"] = false,
+                        ["isTorExit"] = false,
+                        ["isProxy"] = false,
+                        ["anonymizerType"] = "none",
+                        ["securityConfidence"] = 0.85,
+                        ["abuseVelocityScore"] = 80,
+                        ["isKnownScanner"] = false,
+                        ["reasonCodes"] = new[] { "KNOWN_HOSTING_INFRASTRUCTURE_RANGE" },
+                        ["sourceIds"] = new[] { "bgp" },
+                        ["licensePolicyIds"] = new[] { "cc0" },
+                        ["updatedAt"] = "2026-11-10T03:02:07.437Z"
+                    },
+                    ["lookup"] = MakeMockIpRecord("8.8.8.0")
                 }),
                 "/v1/metadata/datasets" => CreateJsonResponse(HttpStatusCode.OK, new Dictionary<string, object?>
                 {
@@ -284,16 +352,6 @@ internal static class Program
                         }
                     }
                 }),
-                "/v1/feedback" => CreateJsonResponse(HttpStatusCode.Created, new Dictionary<string, object?>
-                {
-                    ["id"] = "fb_dotnet_999",
-                    ["prefix_or_ip"] = "8.8.8.8",
-                    ["role"] = "network_operator",
-                    ["issue_type"] = "wrong_country",
-                    ["requested_correction"] = new Dictionary<string, object?> { ["country_code"] = "US" },
-                    ["created_at"] = "2026-10-25T10:00:00Z",
-                    ["status"] = "pending_review"
-                }),
                 "/v1/status" => CreateJsonResponse(HttpStatusCode.OK, new Dictionary<string, object?>
                 {
                     ["status"] = "ok",
@@ -304,12 +362,12 @@ internal static class Program
                     }
                 }),
                 _ => new HttpResponseMessage(HttpStatusCode.NotFound)
-            });
+            };
         });
 
         using var httpClient = new HttpClient(handler);
         using var client = new IpScopeClient(
-            "ips_live_valid_key_12345",
+            TestKey,
             new IpScopeClientOptions(HttpClient: httpClient)
         );
 
@@ -321,18 +379,73 @@ internal static class Program
 
         NetworkPrefixLookupResponse netRes = client.LookupNetwork("8.8.8.0/24");
         AssertEqual("8.8.8.0/24", netRes.QueriedCidr);
-        AssertEqual(15169, netRes.Record?.Asn);
+        AssertEqual("8.8.8.0/24", netRes.MatchedNetwork);
+        AssertEqual(24, netRes.BgpPrefixLength);
+        AssertEqual("8.8.8.0", netRes.Lookup?.Ip);
+        AssertEqual(37.422, netRes.Lookup?.Geo.Latitude);
+        CanonicalNetworkPrefixRecord rec = netRes.Record!;
+        AssertEqual(15169, rec.Asn);
+        AssertEqual("US", rec.CountryCode);
+        AssertEqual("California", rec.Subdivision);
+        AssertEqual("Mountain View", rec.City);
+        AssertEqual("94043", rec.PostalCode);
+        AssertEqual(37.422, rec.Latitude);
+        AssertEqual("declared", rec.LocationType);
+        AssertEqual(0.85, rec.GeoConfidence);
+        AssertEqual(300.0, rec.AccuracyRadiusKm);
+        AssertEqual("hosting", rec.ConnectionType);
+        AssertEqual(true, rec.IsHosting);
+        AssertEqual(false, rec.IsVpn);
+        AssertEqual(false, rec.IsTorExit);
+        AssertEqual(false, rec.IsProxy);
+        AssertEqual("none", rec.AnonymizerType);
+        AssertEqual(0.85, rec.SecurityConfidence);
+        AssertEqual(80.0, rec.AbuseVelocityScore);
+        AssertEqual(false, rec.IsKnownScanner);
+        AssertEqual("KNOWN_HOSTING_INFRASTRUCTURE_RANGE", rec.ReasonCodes?[0]);
+        AssertEqual("2026-11-10T03:02:07.437Z", rec.UpdatedAt);
 
         DatasetsMetadataResponse metaRes = client.GetDatasetsMetadata();
         AssertEqual("2026.10.25-001", metaRes.ActiveVersion);
 
         FeedbackSubmissionResponse fbRes = client.SubmitFeedback(new FeedbackSubmissionInput(
             "8.8.8.8",
-            "network_operator",
+            "network_owner",
             "wrong_country",
-            new Dictionary<string, object?> { ["country_code"] = "US" }
+            new Dictionary<string, object?> { ["country_code"] = "US" },
+            EvidenceUrl: "https://example.net/geofeed.csv",
+            ContactConsent: true,
+            ContactEmail: "noc@example.net"
         ));
         AssertEqual("fb_dotnet_999", fbRes.Id);
+        AssertEqual("2026-10-25T10:00:00Z", fbRes.CreatedAt);
+        AssertEqual("network_owner", fbRes.Role);
+        AssertEqual("https://example.net/geofeed.csv", fbRes.EvidenceUrl);
+        AssertEqual(true, fbRes.ContactConsent);
+        AssertEqual("noc@example.net", fbRes.ContactEmail);
+
+        JsonElement sent = feedbackBodies[0];
+        AssertEqual("https://example.net/geofeed.csv", sent.GetProperty("evidence_url").GetString());
+        AssertEqual(true, sent.GetProperty("contact_consent").GetBoolean());
+        AssertEqual("noc@example.net", sent.GetProperty("contact_email").GetString());
+        AssertTrue(!sent.TryGetProperty("evidence_urls", out _), "evidence_urls must not be sent");
+
+        // 1.0.x shape: the first EvidenceUrls entry is sent as evidence_url; unset fields are omitted.
+#pragma warning disable CS0618
+        var legacy = new FeedbackSubmissionInput(
+            "8.8.8.0/24",
+            "researcher",
+            "other",
+            new Dictionary<string, object?>(),
+            new[] { " ", "https://example.net/rdap" }
+        );
+#pragma warning restore CS0618
+        client.SubmitFeedback(legacy);
+        JsonElement legacySent = feedbackBodies[1];
+        AssertEqual("https://example.net/rdap", legacySent.GetProperty("evidence_url").GetString());
+        AssertTrue(!legacySent.TryGetProperty("evidence_urls", out _), "evidence_urls must not be sent");
+        AssertTrue(!legacySent.TryGetProperty("contact_email", out _), "unset contact_email must be omitted");
+        AssertTrue(!legacySent.TryGetProperty("contact_consent", out _), "unset contact_consent must be omitted");
 
         ServiceStatusResponse statusRes = client.GetStatus();
         AssertEqual("ok", statusRes.Status);
@@ -382,7 +495,7 @@ internal static class Program
 
         using var httpClient = new HttpClient(handler);
         using var client = new IpScopeClient(
-            "ips_live_valid_key_12345",
+            TestKey,
             new IpScopeClientOptions(
                 HttpClient: httpClient,
                 Retry: new RetryOptions(
@@ -410,6 +523,61 @@ internal static class Program
         AssertTrue(client.GetCacheStats().Size <= 3, "LRU cache must not exceed MaxEntries=3");
 
         Console.WriteLine("  [PASS] TestRetriesAuthErrorOversizedGuardAndLruBoundsAsync");
+    }
+
+    private static void TestWireCompatibilityOfNewFields()
+    {
+        static IpLookupResponse Parse(Dictionary<string, object?> raw) =>
+            JsonSerializer.Deserialize<IpLookupResponse>(
+                JsonSerializer.Serialize(raw),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+
+        // abuse_velocity_score: integer 0-100 (new) and legacy fraction both parse.
+        var raw = MakeMockIpRecord("146.75.164.1");
+        ((Dictionary<string, object?>)raw["security_extensions"]!)["abuse_velocity_score"] = 0.14;
+        AssertEqual(0.14, Parse(raw).SecurityExtensions?.AbuseVelocityScore);
+        ((Dictionary<string, object?>)raw["security_extensions"]!)["abuse_velocity_score"] = null;
+        AssertEqual<double?>(null, Parse(raw).SecurityExtensions?.AbuseVelocityScore);
+
+        // Payloads without the new optional fields still parse.
+        var geo = (Dictionary<string, object?>)raw["geo"]!;
+        geo.Remove("latitude");
+        geo.Remove("postal_code");
+        ((Dictionary<string, object?>)raw["security"]!).Remove("is_relay");
+        IpLookupResponse parsed = Parse(raw);
+        AssertEqual<double?>(null, parsed.Geo.Latitude);
+        AssertEqual<string?>(null, parsed.Geo.PostalCode);
+        AssertEqual<bool?>(null, parsed.Security.IsRelay);
+
+        // Feedback response reads both createdAt and created_at.
+        var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var snake = JsonSerializer.Deserialize<FeedbackSubmissionResponse>(
+            """{"id":"fb_1","prefix_or_ip":"8.8.8.8","role":"user","issue_type":"wrong_city","requested_correction":{},"created_at":"2026-10-25T10:00:00Z","status":"pending_review"}""",
+            opts)!;
+        AssertEqual("2026-10-25T10:00:00Z", snake.CreatedAt);
+        var camel = JsonSerializer.Deserialize<FeedbackSubmissionResponse>(
+            """{"id":"fb_2","prefix_or_ip":"8.8.8.8","role":"user","issue_type":"other","requested_correction":{},"createdAt":"2026-11-10T00:00:00Z","status":"pending_review"}""",
+            opts)!;
+        AssertEqual("2026-11-10T00:00:00Z", camel.CreatedAt);
+
+        // Network record still reads snake_case keys; missing new fields stay null; record round-trips.
+        var net = JsonSerializer.Deserialize<NetworkPrefixLookupResponse>(
+            """{"queried_cidr":"10.0.0.0/8","family":4,"dataset_version":"v","record":{"prefix":"10.0.0.0/8","family":4,"country_code":"ZZ","is_vpn":false}}""",
+            opts)!;
+        AssertEqual("ZZ", net.Record?.CountryCode);
+        AssertEqual(false, net.Record?.IsVpn);
+        AssertEqual<string?>(null, net.MatchedNetwork);
+        AssertTrue(net.Lookup is null, "lookup should be null when absent");
+        var roundTrip = JsonSerializer.Deserialize<CanonicalNetworkPrefixRecord>(JsonSerializer.Serialize(net.Record), opts)!;
+        AssertEqual("ZZ", roundTrip.CountryCode);
+        var nullRecord = JsonSerializer.Deserialize<NetworkPrefixLookupResponse>(
+            """{"queried_cidr":"10.0.0.0/8","family":4,"dataset_version":"v","record":null}""", opts)!;
+        AssertTrue(nullRecord.Record is null, "null record should stay null");
+
+        AssertTrue(FeedbackValues.Roles.Contains("network_owner"), "roles");
+        AssertTrue(FeedbackValues.IssueTypes.Contains("virtual_location_mismatch"), "issue types");
+
+        Console.WriteLine("  [PASS] TestWireCompatibilityOfNewFields");
     }
 
     private static void AssertEqual<T>(T expected, T actual)

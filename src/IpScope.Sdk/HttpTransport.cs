@@ -15,7 +15,8 @@ internal sealed class HttpTransport : IDisposable
     public const string DefaultBaseUrl = "https://api.ipscope.io";
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(5);
     public const int MaxResponseBytes = 2 * 1024 * 1024; // 2 MiB hard ceiling
-    public const string SdkUserAgent = "ipscope-dotnet/1.0.0";
+    public const string SdkVersion = "1.1.0";
+    public const string SdkUserAgent = "ipscope-dotnet/" + SdkVersion;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -408,13 +409,12 @@ internal sealed class HttpTransport : IDisposable
                 ? vals.FirstOrDefault()?.Trim()
                 : null;
 
+        // X-RateLimit-Reset is the number of seconds until the window resets (not an epoch).
         return new RateLimitMetadata(
-            ParseInt(headers, "x-ratelimit-limit"),
-            ParseInt(headers, "x-ratelimit-remaining"),
-            ParseLong(headers, "x-ratelimit-reset"),
-            ParseString(headers, "x-ratelimit-scope"),
-            ParseInt(headers, "x-ratelimit-burst"),
-            ParseInt(headers, "x-ratelimit-rps")
+            LimitPerMinute: ParseInt(headers, "x-ratelimit-limit"),
+            Remaining: ParseInt(headers, "x-ratelimit-remaining"),
+            Scope: ParseString(headers, "x-ratelimit-scope"),
+            ResetAfterSeconds: ParseLong(headers, "x-ratelimit-reset")
         );
     }
 
@@ -468,13 +468,9 @@ internal sealed class HttpTransport : IDisposable
                 return TimeSpan.FromSeconds(secs);
             }
         }
-        if (rl.ResetEpochSeconds is { } resetEpoch)
+        if (rl.ResetAfterSeconds is { } resetAfter && resetAfter > 0)
         {
-            TimeSpan delta = DateTimeOffset.FromUnixTimeSeconds(resetEpoch) - DateTimeOffset.UtcNow;
-            if (delta > TimeSpan.Zero)
-            {
-                return delta;
-            }
+            return TimeSpan.FromSeconds(resetAfter);
         }
         return null;
     }

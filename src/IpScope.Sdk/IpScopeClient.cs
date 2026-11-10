@@ -14,6 +14,12 @@ public sealed class IpScopeClient : IDisposable
 {
     public const int MaxResponseBytes = HttpTransport.MaxResponseBytes;
 
+    /// <summary>SDK version, also sent in the <c>User-Agent</c> header.</summary>
+    public const string SdkVersion = HttpTransport.SdkVersion;
+
+    /// <summary>Default <c>User-Agent</c> value (<c>ipscope-dotnet/{version}</c>).</summary>
+    public const string SdkUserAgent = HttpTransport.SdkUserAgent;
+
     private readonly HttpTransport _transport;
     private readonly LruTtlCache<IpLookupResponse> _ipCache;
     private readonly LruTtlCache<NetworkPrefixLookupResponse> _networkCache;
@@ -368,7 +374,7 @@ public sealed class IpScopeClient : IDisposable
         }
 
         var opts = options ?? new RequestOptions();
-        var normalized = feedback with { PrefixOrIp = target };
+        var normalized = feedback with { PrefixOrIp = target, EvidenceUrl = feedback.EffectiveEvidenceUrl };
         var resp = await _transport.RequestAsync<FeedbackSubmissionResponse>(
             HttpMethod.Post,
             "/v1/feedback",
@@ -632,7 +638,7 @@ public sealed class IpScopeClient : IDisposable
         }
 
         var opts = options ?? new RequestOptions();
-        var normalized = feedback with { PrefixOrIp = target };
+        var normalized = feedback with { PrefixOrIp = target, EvidenceUrl = feedback.EffectiveEvidenceUrl };
         return _transport.RequestSync<FeedbackSubmissionResponse>(
             HttpMethod.Post,
             "/v1/feedback",
